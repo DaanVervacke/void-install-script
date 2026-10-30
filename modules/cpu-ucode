@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Not applicable on Apple Silicon (Intel/AMD microcode)
+[ "$platform" == "asahi" ] && return 1
+
 title=cpu-ucode
 description="- Installs CPU microcode for Intel or AMD"
 status=off

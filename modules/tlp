@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Not applicable on Apple Silicon (tlp conflicts with asahi-macsmc-battery-udev)
+[ "$platform" == "asahi" ] && return 1
+
 title=tlp
 description="- Advanced power management"
 status=off

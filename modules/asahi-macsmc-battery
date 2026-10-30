@@ -1,0 +1,15 @@
+#!/bin/bash
+
+# Only applicable on Apple Silicon
+[ "$platform" != "asahi" ] && return 1
+
+title=asahi-macsmc-battery
+description="- Battery charge limit udev rules for Apple Silicon (conflicts with tlp)"
+status=off
+
+main() {
+    commandFailure="Installing asahi-macsmc-battery-udev has failed." &&
+        install asahi-macsmc-battery-udev
+
+    return 0
+}

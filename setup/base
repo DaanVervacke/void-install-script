@@ -17,7 +17,14 @@ case "$basesystem" in
         [ "$filesystem" != "zfs" ] &&
             { [ "$encryption" == "Yes" ] && install cryptsetup ; }
 
-        if [ "$kernel" != "linux" ] ; then
+        if [ "$platform" == "asahi" ]; then
+            # asahi-base depends on dracut, ignore it before installing if another initramfs generator was chosen
+            [ "$initrd" != "dracut" ] &&
+                { echo "ignorepkg=dracut" >> /mnt/etc/xbps.d/ignore.conf || die ; }
+
+            # asahi-base provides linux-asahi, m1n1, asahi-uboot, speakersafetyd and asahi-scripts
+            XBPS_ARCH=$ARCH install asahi-base
+        elif [ "$kernel" != "linux" ] ; then
             echo "ignorepkg=linux" >> /mnt/etc/xbps.d/ignore.conf || die
             install "$kernel"
             system "xbps-remove -ROoy linux"
@@ -33,8 +40,11 @@ case "$basesystem" in
         fi
 
         if [ "$initrd" != "dracut" ]; then
-            echo "ignorepkg=dracut" >> /mnt/etc/xbps.d/ignore.conf || die
-            system "xbps-remove -ROoy dracut"
+            grep -qx "ignorepkg=dracut" /mnt/etc/xbps.d/ignore.conf 2>/dev/null ||
+                { echo "ignorepkg=dracut" >> /mnt/etc/xbps.d/ignore.conf || die ; }
+
+            xbps-query -r /mnt dracut &>/dev/null &&
+                system "xbps-remove -ROoy dracut"
 
             install "$initrd"
         else
@@ -44,7 +54,12 @@ case "$basesystem" in
         [ "$su" == "doas" ] &&
             install opendoas
 
-        if [[ ! ${modules[@]} =~ "wifi-firmware" ]]; then
+        if [[ ! ${modules[@]} =~ "wifi-firmware" ]] && [ "$platform" == "asahi" ]; then
+            # Apple Wi-Fi firmware is provided by the Asahi vendor firmware, but iw and wpa_supplicant are still required
+            echo "ignorepkg=wifi-firmware" >> /mnt/etc/xbps.d/ignore.conf || die
+
+            system "xbps-remove -ROoy wifi-firmware"
+        elif [[ ! ${modules[@]} =~ "wifi-firmware" ]]; then
             echo "ignorepkg=wifi-firmware" >> /mnt/etc/xbps.d/ignore.conf || die
             echo "ignorepkg=iw" >> /mnt/etc/xbps.d/ignore.conf || die
             echo "ignorepkg=wpa_supplicant" >> /mnt/etc/xbps.d/ignore.conf || die
@@ -58,7 +73,14 @@ case "$basesystem" in
     *)
         XBPS_ARCH=$ARCH install $basesystem
 
-        install "$kernel"
+        if [ "$platform" == "asahi" ]; then
+            [ "$initrd" != "dracut" ] &&
+                { echo "ignorepkg=dracut" >> /mnt/etc/xbps.d/ignore.conf || die ; }
+
+            install asahi-base
+        else
+            install "$kernel"
+        fi
 
         [ "$filesystem" != "zfs" ] &&
             { [ "$encryption" == "Yes" ] && install cryptsetup ; }
@@ -75,8 +97,11 @@ case "$basesystem" in
         # to be pulled in as a dependency, ignore it and remove
         # if it exists:
         if [ "$initrd" != "dracut" ]; then
-            echo "ignorepkg=dracut" >> /mnt/etc/xbps.d/ignore.conf || die
-            system "xbps-remove -ROoy dracut"
+            grep -qx "ignorepkg=dracut" /mnt/etc/xbps.d/ignore.conf 2>/dev/null ||
+                { echo "ignorepkg=dracut" >> /mnt/etc/xbps.d/ignore.conf || die ; }
+
+            xbps-query -r /mnt dracut &>/dev/null &&
+                system "xbps-remove -ROoy dracut"
         fi
 
         install "$initrd"
@@ -99,11 +124,19 @@ esac
 [ -n "$bootloader" ] && [ "$bootloader" != "none" ] &&
     commandFailure="Bootloader package installation has failed"
 
-case "$bootloader" in
-    uki) install efibootmgr ukify systemd-boot-efistub ;;
-    grub) install grub-x86_64-efi ;;
-    zfsbootmenu) install zfsbootmenu systemd-boot-efistub efibootmgr ;;
-esac
+if [ "$platform" == "asahi" ]; then
+    # m1n1 and U-Boot only boot EFI/BOOT/BOOTAA64.EFI, EFI boot entries are not used
+    case "$bootloader" in
+        uki) install ukify systemd-boot-efistub ;;
+        grub) install grub-arm64-efi ;;
+    esac
+else
+    case "$bootloader" in
+        uki) install efibootmgr ukify systemd-boot-efistub ;;
+        grub) install grub-x86_64-efi ;;
+        zfsbootmenu) install zfsbootmenu systemd-boot-efistub efibootmgr ;;
+    esac
+fi
 
 if [ "$bootloader" == "zfsbootmenu" ]; then
     commandFailure="Copying hostid to the new install has failed."
@@ -117,9 +150,10 @@ commandFailure="Creating $kernel virtualpkg has failed."
 case "$kernel" in
     linux-lts) echo "virtualpkg=linux-headers:linux-lts-headers" >> /mnt/etc/xbps.d/headers.conf || die ;;
     linux-mainline) echo "virtualpkg=linux-headers:linux-mainline-headers" >> /mnt/etc/xbps.d/headers.conf || die ;;
+    linux-asahi) echo "virtualpkg=linux-headers:linux-asahi-headers" >> /mnt/etc/xbps.d/headers.conf || die ;;
 esac
 
-if [ "$repository" != "https://repo-default.voidlinux.org/current" ] && [ "$repository" != "https://repo-default.voidlinux.org/current/musl" ]; then
+if [ "$repository" != "https://repo-default.voidlinux.org/current" ] && [ "$repository" != "https://repo-default.voidlinux.org/current/musl" ] && [ "$repository" != "https://repo-default.voidlinux.org/current/aarch64" ]; then
     xmirror -s "$repository" -r /mnt ||
         { commandFailure="Repository configuration has failed." ; die ; }
 fi
@@ -188,14 +222,25 @@ fi
 [ -n "$homeSize" ] && [ "$lvm" == "No" ] && [ "$filesystem" != "zfs" ] &&
     { partVar=$(blkid -o value -s UUID "$home") ; echo "UUID=$partVar /home $filesystem defaults 0 0" >> /mnt/etc/fstab || die ; }
 
+if [ "$bootloader" == "m1n1" ]; then
+    # Have m1n1 boot the kernel and initramfs directly instead of chainloading U-Boot,
+    # kernel parameters are then passed via /etc/m1n1.conf
+    commandFailure="Configuring m1n1 direct boot has failed."
+    sed -i -e 's/^PAYLOAD=.*/PAYLOAD=kernel/' /mnt/etc/default/m1n1-kernel-hook || die
+    grep -q "^PAYLOAD=kernel" /mnt/etc/default/m1n1-kernel-hook || die
+    echo "chosen.bootargs=loglevel=4" >> /mnt/etc/m1n1.conf || die
+fi
+
 if [ "$initrd" == "dracut" ]; then
     case "$bootloader" in
-        uki)
-            commandFailure="Configuring ukify kernel hook has failed."
-            cp "$(pwd)/misc/60-ukify" /mnt/etc/kernel.d/post-install/60-ukify || die
-            chmod 744 /mnt/etc/kernel.d/post-install/60-ukify || die
+        uki|m1n1)
+            if [ "$bootloader" == "uki" ]; then
+                commandFailure="Configuring ukify kernel hook has failed."
+                cp "$(pwd)/misc/60-ukify" /mnt/etc/kernel.d/post-install/60-ukify || die
+                chmod 744 /mnt/etc/kernel.d/post-install/60-ukify || die
+            fi
 
-            commandFailure="Configuring uki base kernel parameters has failed."
+            commandFailure="Configuring base kernel parameters has failed."
             partVar=$(blkid -o value -s UUID "$root")
             [ "$lvm" == "Yes" ] && [ "$encryption" == "Yes" ] &&
                 setKernelParam "rd.luks.uuid=$partVar root=/dev/void/root rootfstype=$filesystem rw"
@@ -301,16 +346,27 @@ elif [ "$initrd" == "tinyramfs" ]; then
     [ "$filesystem" != "ext4" ] &&
         { sed -i "s/root_type=ext4/root_type=${filesystem}/g" "$trfsconfig" || die ; }
 
+    # the asahi hook (from asahi-base) loads the NVMe drivers and vendor firmware, it must run before luks and lvm
+    [ "$platform" == "asahi" ] &&
+        { sed -i 's/hooks="eudev/hooks="eudev,asahi/' "$trfsconfig" || die ; }
+
     [ "$initrdhostonly" == "true" ] &&
         { echo 'hostonly=true' >> "$trfsconfig" || die ; }
 
     unset trfsconfig
 fi
 
-[ "$acpi" == "false" ] &&
+if [ "$platform" == "asahi" ] && [ "$bootloader" == "uki" ]; then
+    # linux-asahi installs an uncompressed vmlinux image, and arm64 firmware expects BOOTAA64.EFI
+    commandFailure="Configuring ukify kernel hook for Apple Silicon has failed."
+    sed -i -e 's:/boot/vmlinuz-:/boot/vmlinux-:' -e 's:EFI/boot/bootx64.efi:EFI/BOOT/BOOTAA64.EFI:' /mnt/etc/kernel.d/post-install/60-ukify || die
+fi
+
+# acpi and intel_pstate do not apply to Apple Silicon
+[ "$platform" != "asahi" ] && [ "$acpi" == "false" ] &&
     { commandFailure="Disabling acpi has failed." ; setKernelParam "acpi=off" ; }
 
-[ "$intel_pstate" == "false" ] &&
+[ "$platform" != "asahi" ] && [ "$intel_pstate" == "false" ] &&
     { commandFailure="Disabling intel_pstate has failed." ; setKernelParam "intel_pstate=disable" ; }
 
 if [ "$libc" == "glibc" ]; then

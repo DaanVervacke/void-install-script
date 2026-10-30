@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Not applicable on Apple Silicon (Intel audio DSP firmware)
+[ "$platform" == "asahi" ] && return 1
+
 title=sof-firmware
 description="- Sound Open Firmware and topology binaries (Audio support for modern laptops)"
 status=off

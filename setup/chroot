@@ -11,6 +11,10 @@ exitFunction () {
     xbps-reconfigure -fa ||
         { commandFailure="xbps-reconfigure has failed." ; die ; }
 
+    # Apple Silicon has no persistent EFI variables, m1n1 and U-Boot always boot EFI/BOOT/BOOTAA64.EFI
+    [ "$platform" == "asahi" ] &&
+        exit 0
+
     [ "$bootloader" == "zfsbootmenu" ] &&
         { commandFailure="Creating zbm boot entry has failed." ; efibootmgr --create --label "Void Linux" --disk "$diskInput" --part 1 --loader "\EFI\boot\bootx64.EFI" ; }
 
@@ -76,15 +80,21 @@ case "$bootloader" in
         # Force kernel reconfigure to build the UKI
         commandFailure="Forced kernel reconfigure has failed."
         chmod +x /etc/kernel.d/post-install/60-ukify || die
-        xbps-reconfigure -f linux"$(find /boot -name vmlinuz\* | tr -d "/boot/vmlinuz-" | cut -f1,2 -d".")" || die
+        xbps-reconfigure -f "$(kernelPackage)" || die
 
         # This should never need to be regenerated assuming the EFI executable is kept where it's at.
-        efibootmgr --create --label "Void Linux" --disk "$diskInput" --part 1 --loader "\EFI\boot\bootx64.efi" ||
-            { commandFailure="Creating EFI boot entry has failed." ; die ; }
+        [ "$platform" != "asahi" ] &&
+            { efibootmgr --create --label "Void Linux" --disk "$diskInput" --part 1 --loader "\EFI\boot\bootx64.efi" ||
+                { commandFailure="Creating EFI boot entry has failed." ; die ; } ; }
     ;;
     grub)
-        grub-install --removable --target=x86_64-efi --efi-directory=/boot/efi ||
-            { commandFailure="GRUB installation has failed." ; die ; }
+        if [ "$platform" == "asahi" ]; then
+            grub-install --removable --target=arm64-efi --efi-directory=/boot/efi ||
+                { commandFailure="GRUB installation has failed." ; die ; }
+        else
+            grub-install --removable --target=x86_64-efi --efi-directory=/boot/efi ||
+                { commandFailure="GRUB installation has failed." ; die ; }
+        fi
     ;;
     zfsbootmenu)
         generate-zbm ||

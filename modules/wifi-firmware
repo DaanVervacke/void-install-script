@@ -1,10 +1,17 @@
 #!/bin/bash
 title=wifi-firmware
-description="- Wifi firmware and utilities"
-status=on
+if [ "$platform" == "asahi" ]; then
+    # Built-in Apple Wi-Fi uses the Asahi vendor firmware, this is only useful for other (such as USB) adapters
+    description="- Generic wifi firmware (not needed for built-in Apple Wi-Fi)"
+    status=off
+else
+    description="- Wifi firmware and utilities"
+    status=on
+fi
 
 # If this is toggled off, and the user is using the regular base metapackage,
 # the packages will be removed from the system.
+# On Apple Silicon, only the wifi-firmware package is removed, iw and wpa_supplicant are kept.
 # If the user has defined their own basesystem, install if enabled:
 main() {
     [ "$basesystem" != "base-system" ] &&

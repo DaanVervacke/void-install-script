@@ -6,6 +6,10 @@
 for i in "${graphicsArray[@]}"
 do
     case $i in
+        asahi)
+            install mesa-dri vulkan-loader mesa-vaapi
+        ;;
+
         amd)
             install mesa-dri vulkan-loader mesa-vulkan-radeon mesa-vaapi
         ;;
@@ -230,6 +234,14 @@ case "$audio" in
         # alsa configuration
         system "ln -s /usr/share/alsa/alsa.conf.d/50-pipewire.conf /etc/alsa/conf.d"
         system "ln -s /usr/share/alsa/alsa.conf.d/99-pipewire-default.conf /etc/alsa/conf.d"
+
+        if [ "$platform" == "asahi" ]; then
+            # Speaker DSP configuration for Apple Silicon, speakersafetyd must be running for the speakers to be enabled
+            install asahi-audio
+
+            [ -e /mnt/etc/runit/runsvdir/default/speakersafetyd ] ||
+                enableService speakersafetyd
+        fi
     ;;
     pulseaudio)
         install pulseaudio alsa-plugins-pulseaudio

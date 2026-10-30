@@ -11,7 +11,7 @@ If/when creating an issue, please attach the logfile at `/tmp/void-install-date.
 
 This script is not officially supported. Any issues should be filed here as opposed to any official Void Linux support area- if you're not sure if the issue you're facing stems from this installer, it would be best to create an issue on this repository before asking in the Void IRC or making a post on the subreddit.
 
-![TUI Image](https://github.com/kkrruumm/void-install-script/blob/main/images/tuiscreenshot.png)
+![TUI Image](images/tuiscreenshot.png)
 
 # Features
 ```
@@ -52,6 +52,7 @@ This script is not officially supported. Any issues should be filed here as oppo
 -Option to choose between linux, linux-lts, and linux-mainline kernels
 -Configure partitions in the installer for home, swap, and root with LVM
 -Support for both glibc and musl
+-Support for Apple Silicon Macs (Asahi), see Apple Silicon notes
 -User creation and basic configuration
 -Custom post_install functionality
 ```
@@ -63,11 +64,44 @@ This script is not officially supported. Any issues should be filed here as oppo
 3. Run the following commands:
     - `sudo xbps-install -Su`
     - `sudo xbps-install -S git`
-    - `git clone https://github.com/kkrruumm/void-install-script.git`
+    - `git clone https://github.com/DaanVervacke/void-install-script.git`
     - `cd void-install-script`
     - `sudo ./viss`
 4. Follow on-screen steps
 5. Done.
+
+# Apple Silicon notes
+
+This installer supports Apple Silicon Macs following the [Void Linux Apple Silicon guide](https://docs.voidlinux.org/installation/guides/arm-devices/apple-silicon.html). The platform is detected automatically, x86_64 installs are unaffected.
+
+Before running the installer:
+
+1. From macOS, run the Asahi Linux installer and choose "UEFI environment only", leaving free space for Void Linux:
+    - `curl https://alx.sh > alx.sh`
+    - `sh ./alx.sh`
+2. Boot an [Apple Silicon Void Linux live image](https://voidlinux.org/download/#arm%20platforms) from USB, then follow the instructions above.
+
+Differences from x86_64:
+
+- The live image may boot with the display backlight at its lowest level. The installer raises it to 75% when it starts on Apple Silicon. To fix it beforehand, log in and run: `for b in /sys/class/backlight/*; do cat $b/max_brightness > $b/brightness; done`
+- The disk is never wiped as a whole. The installer detects the Asahi ESP from the device tree (`/proc/device-tree/chosen/asahi,efi-system-partition`), asks for confirmation, and mounts it at `/boot/efi` without formatting it. Boot files from previous installations (`EFI/BOOT/BOOTAA64.EFI`, `EFI/BOOT/grub.cfg`, `EFI/void`, `EFI/grub`) are removed. `m1n1/`, `asahi/` and `vendorfw/` are kept.
+- New partitions (root, and optionally swap and home) are created inside a space of your choice on the internal disk. The secure wipe option only shreds these new partitions.
+- Reinstalling over an existing (Asahi) Void Linux installation is supported. You can select existing Linux partitions to delete and reuse; the ESP, other EFI System Partitions, APFS and Apple system partitions are never offered. Selected partitions are merged with adjacent free space into one region. Deleting requires typing `DELETE`. Anything still using them on the live system (mounts, swap, LVM volume groups, LUKS mappings) is closed automatically.
+- `base-system` and `asahi-base` are installed. The kernel is always `linux-asahi`, so the kernel menu is skipped.
+- The default repository is `https://repo-default.voidlinux.org/current/aarch64` for both glibc (`aarch64`) and musl (`aarch64-musl`).
+- Bootloader choices:
+    - `grub` - `grub-arm64-efi`, installed with `--removable` to `EFI/BOOT/BOOTAA64.EFI`
+    - `uki` - UKI built by ukify at `EFI/BOOT/BOOTAA64.EFI`
+    - `m1n1` - m1n1 boots the kernel and initramfs directly (`PAYLOAD=kernel` in `/etc/default/m1n1-kernel-hook`), kernel parameters are set with `chosen.bootargs=` in `/etc/m1n1.conf`
+    - `none`
+- No EFI boot entries are created, as m1n1/U-Boot always boot `EFI/BOOT/BOOTAA64.EFI`.
+- Both dracut and tinyramfs are supported. With tinyramfs, the `asahi` hook is added to its config.
+- The only graphics option is `asahi` (mesa). Choosing pipewire also installs `asahi-audio` and enables `speakersafetyd`. pulseaudio is not offered.
+- ZFS, the `acpi`/`intel_pstate` hidden options, and the `cpu-ucode`, `sof-firmware`, `amdgpu_unlock` and `tlp` modules are not available.
+- The `wifi-firmware` module defaults to off and only controls the `wifi-firmware` package. The built-in Wi-Fi uses the Asahi vendor firmware, and `iw` and `wpa_supplicant` are always kept.
+- Extra modules: `asahi-fwupdate` (on by default) runs `asahi-fwupdate`, and `asahi-macsmc-battery` installs the battery charge limit udev rules.
+
+After installation, run `asahi-fwupdate` whenever the `asahi-firmware` package is updated.
 
 # UKI notes
 
@@ -228,7 +262,7 @@ All of the current and future wrapper functions will be located in ``misc/libvis
 
 # Misc notes
 
-This installer only supports x86_64-efi. I currently have no plans to support anything else.
+This installer supports x86_64-efi and Apple Silicon (aarch64, via Asahi). Other platforms are not supported.
 
 If you have found this script useful, do star this repository!
 
