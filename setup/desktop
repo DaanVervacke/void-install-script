@@ -239,8 +239,7 @@ case "$audio" in
             # Speaker DSP configuration for Apple Silicon, speakersafetyd must be running for the speakers to be enabled
             install asahi-audio
 
-            [ -e /mnt/etc/runit/runsvdir/default/speakersafetyd ] ||
-                enableService speakersafetyd
+            enableService speakersafetyd
         fi
     ;;
     pulseaudio)

@@ -25,10 +25,9 @@ main() {
     commandFailure="Enabling virt services has failed." &&
         enableService libvirtd virtlogd virtlockd
 
-    # dbus and polkitd may or may not be installed by other things, recheck
-    # this will fail if /var/service/dbus is checked as opposed to the default runsvdir
-    [ ! -e /mnt/etc/runit/runsvdir/default/dbus ] &&
-        { commandFailure="Enabling dbus service has failed." ; enableService dbus ; }
+    # dbus and polkitd may or may not be installed by other things, enableService skips it if already enabled
+    commandFailure="Enabling dbus service has failed." &&
+        enableService dbus
 
     # allow proc access to polkitd for hardened proc module
     # if not already done by the harden proc module
