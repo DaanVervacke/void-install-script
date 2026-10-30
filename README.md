@@ -83,6 +83,7 @@ Before running the installer:
 
 Differences from x86_64:
 
+- The live image may boot with the display backlight at its lowest level. The installer raises it to 75% when it starts on Apple Silicon. To fix it beforehand, log in and run: `for b in /sys/class/backlight/*; do cat $b/max_brightness > $b/brightness; done`
 - The disk is never wiped as a whole. The installer detects the Asahi ESP from the device tree (`/proc/device-tree/chosen/asahi,efi-system-partition`), asks for confirmation, and mounts it at `/boot/efi` without formatting it. Boot files from previous installations (`EFI/BOOT/BOOTAA64.EFI`, `EFI/BOOT/grub.cfg`, `EFI/void`, `EFI/grub`) are removed. `m1n1/`, `asahi/` and `vendorfw/` are kept.
 - New partitions (root, and optionally swap and home) are created inside a space of your choice on the internal disk. The secure wipe option only shreds these new partitions.
 - Reinstalling over an existing (Asahi) Void Linux installation is supported. You can select existing Linux partitions to delete and reuse; the ESP, other EFI System Partitions, APFS and Apple system partitions are never offered. Selected partitions are merged with adjacent free space into one region. Deleting requires typing `DELETE`. Anything still using them on the live system (mounts, swap, LVM volume groups, LUKS mappings) is closed automatically.

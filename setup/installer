@@ -53,6 +53,16 @@ which zfs &>/dev/null ||
     zfspossible=no
 
 if [ "$platform" == "asahi" ]; then
+    # The live image may boot with the panel backlight at (or near) its minimum, raise it to 75%
+    for backlight in /sys/class/backlight/*; do
+        [ -w "$backlight/brightness" ] && [ -r "$backlight/max_brightness" ] || continue
+        maxBrightness=$(cat "$backlight/max_brightness")
+        targetBrightness=$(( maxBrightness * 3 / 4 ))
+        if [ "$(cat "$backlight/brightness")" -lt "$targetBrightness" ]; then
+            echo "$targetBrightness" > "$backlight/brightness"
+        fi
+    done
+
     echo "Locating the Asahi EFI System Partition..."
 
     # m1n1 exposes the PARTUUID of the ESP it was booted from in the device tree
