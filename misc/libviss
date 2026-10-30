@@ -95,8 +95,10 @@ setKernelParam() {
 
 enableService() {
     # looping this will enable one to enableService service1 service2 service3...
+    # already enabled services are skipped, the check runs inside the chroot
+    # as the service links are absolute and would otherwise resolve against the live system
     for service in "$@"; do
-        system "ln -s /etc/sv/$service /var/service"
+        system "[ -L /var/service/$service ] || ln -s /etc/sv/$service /var/service"
     done
 
     return 0
