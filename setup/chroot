@@ -67,7 +67,13 @@ chmod 755 / || die
         echo -e "Configuring LUKS key... \n"
         dd bs=1 count=64 if=/dev/urandom of=/boot/volume.key || die
         echo -e "${YELLOW}Enter your encryption passphrase: ${NC}\n"
-        cryptsetup luksAddKey "$root" /boot/volume.key || die
+        if [ "$platform" == "asahi" ]; then
+            # The random keyfile needs no stretching, keep this slot cheap so a mistyped passphrase in GRUB
+            # does not push the unlock past U-Boot's 60 second watchdog
+            cryptsetup luksAddKey --pbkdf-force-iterations 1000 "$root" /boot/volume.key || die
+        else
+            cryptsetup luksAddKey "$root" /boot/volume.key || die
+        fi
         chmod 000 /boot/volume.key || die
         chmod -R g-rwx,o-rwx /boot || die
     fi

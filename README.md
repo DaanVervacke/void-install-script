@@ -198,6 +198,8 @@ The LUKS default is "2000", or 2 seconds. The default in this installer has been
 
 The fips140 compliant value here would be 600000 according to owasp, though this would result in a 10 minute disk unlock time.
 
+On Apple Silicon with GRUB, itertime defaults to "1000" instead. GRUB unlocks the drive itself with a pbkdf2 implementation that is many times slower than the one cryptsetup benchmarks with, and U-Boot's hardware watchdog reboots the machine if this takes more than 60 seconds, which results in a passphrase prompt that hangs and reboots. Do not raise itertime for such installs.
+
 - `zfsiters` sets the specific amount of iterations for the pbkdf2 kdf used by ZFS, as ZFS does not have a built in way to calculate this based on the amount of time the user would like to wait. Raise or lower as desired, with the same implications as itertime with LUKS.
 
 - `initrdhostonly` will instruct the initramfs generator to generate a host-specific initramfs image when set to `true`.
