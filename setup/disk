@@ -214,8 +214,15 @@ if [ "$encryption" == "Yes" ] && [ "$filesystem" != "zfs" ]; then
     [ -z "$keysize" ] &&
         keysize="512"
 
-    [ -z "$itertime" ] &&
-        itertime="10000"
+    # On Apple Silicon, GRUB has to unlock LUKS1 itself with its unaccelerated pbkdf2, which is far slower than the
+    # benchmark cryptsetup does, while U-Boot's hardware watchdog resets the machine after 60 seconds of no servicing
+    if [ -z "$itertime" ]; then
+        if [ "$platform" == "asahi" ] && [ "$bootloader" == "grub" ]; then
+            itertime="1000"
+        else
+            itertime="10000"
+        fi
+    fi
 
     clear
     echo -e "${YELLOW}Enter your encryption passphrase here.${NC}"
