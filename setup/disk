@@ -34,8 +34,61 @@ asahiPartitionDevice() {
     sfdisk -d "$diskInput" | sed -n "s|^\([^ ]*\) : start= *$1,.*|\1|p"
 }
 
+asahiClosePartition() {
+    # Release everything stacked on top of partition $1: mounts, swap, LVM volume groups and LUKS mappings
+    local dev type vg
+
+    commandFailure="Closing $1 has failed."
+
+    while read -r dev type; do
+        if lsblk -dno MOUNTPOINT "$dev" | grep -qx "\[SWAP\]"; then
+            swapoff "$dev" || die
+        fi
+
+        if findmnt -rn -S "$dev" &>/dev/null; then
+            umount -A -R "$dev" || die
+        fi
+    done < <(lsblk -nrpo NAME,TYPE "$1" | tac)
+
+    while read -r dev type; do
+        [ "$dev" == "$1" ] || [ "$type" == "crypt" ] || continue
+
+        vg=$(pvs --noheadings -o vg_name "$dev" 2>/dev/null | xargs)
+        [ -n "$vg" ] &&
+            { vgchange -a n "$vg" || die ; }
+    done < <(lsblk -nrpo NAME,TYPE "$1")
+
+    while read -r dev type; do
+        [ "$type" == "crypt" ] &&
+            { cryptsetup close "$dev" || die ; }
+    done < <(lsblk -nrpo NAME,TYPE "$1" | tac)
+
+    return 0
+}
+
 if [ "$platform" == "asahi" ]; then
-    # Never touch existing partitions on Apple Silicon, only append new ones inside the chosen free space.
+    # Delete the existing partitions the user chose to replace, such as a previous Void installation
+    if [ "${#deletePartitions[@]}" -gt 0 ]; then
+        partitionNumbers=()
+        for i in "${deletePartitions[@]}"
+        do
+            asahiClosePartition "$i"
+
+            commandFailure="Wiping $i has failed."
+            wipefs --all -f "$i" || die
+            partitionNumber=$(cat /sys/class/block/"$(basename "$i")"/partition) || die
+            partitionNumbers+=("$partitionNumber")
+        done
+
+        echo "Deleting partitions ${deletePartitions[*]}..."
+        sfdisk --delete "$diskInput" "${partitionNumbers[@]}" ||
+            { commandFailure="Deleting partitions ${deletePartitions[*]} has failed." ; die ; }
+
+        partx -u "$diskInput" 2>/dev/null
+        udevadm settle
+    fi
+
+    # Never touch any other existing partitions on Apple Silicon, only append new ones inside the chosen space.
     # The Asahi ESP ($esp) was detected by setup/installer and is reused as-is.
     declare -gA partitionStarts
     sfdiskScript=""
@@ -457,5 +510,12 @@ for dir in dev proc sys run; do mkdir -p /mnt/$dir ; mount --rbind /$dir /mnt/$d
 
 mkdir -p /mnt/boot/efi || die
 mount "$esp" /mnt/boot/efi || die
+
+if [ "$platform" == "asahi" ]; then
+    # Remove boot files of previous installations, m1n1/, asahi/ and vendorfw/ are kept. vfat is case insensitive.
+    commandFailure="Removing old boot files from the ESP has failed."
+    rm -f /mnt/boot/efi/EFI/BOOT/BOOTAA64.EFI /mnt/boot/efi/EFI/BOOT/grub.cfg || die
+    rm -rf /mnt/boot/efi/EFI/void /mnt/boot/efi/EFI/grub || die
+fi
 
 return 0

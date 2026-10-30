@@ -26,49 +26,116 @@ drawDialog --msgbox "Welcome!\n\nThis is primarily a guided installer, but at an
 # Each section of the installer will have its own function, so the user can go back to a specific spot to change something.
 asahiDiskConfig() {
     # On Apple Silicon, the disk layout created by macOS and the Asahi installer must not be altered.
-    # Void is installed into free space left by the Asahi installer, and the existing Asahi ESP is reused.
+    # Void is installed into free space left by the Asahi installer, and/or into the space of existing
+    # Linux partitions (such as a previous Void installation) the user chooses to delete. The existing Asahi ESP is reused.
     local espSize=$(lsblk -dno SIZE "$esp")
 
-    drawDialog --title "Partitioner - Asahi ESP" --yes-label "Continue" --no-label "Exit" --yesno "The following Asahi EFI System Partition was detected:\n\nESP: $esp ($espSize)\nPARTUUID: $espPartuuid\nDisk: $espDisk\n\nThis partition will be mounted at /boot/efi and will NOT be formatted.\n\nIs this correct?" 0 0 ||
+    drawDialog --title "Partitioner - Asahi ESP" --yes-label "Continue" --no-label "Exit" --yesno "The following Asahi EFI System Partition was detected:\n\nESP: $esp ($espSize)\nPARTUUID: $espPartuuid\nDisk: $espDisk\n\nThis partition will be mounted at /boot/efi and will NOT be formatted.\nBoot files of previous installations on it will be removed, m1n1, asahi and vendorfw are kept.\n\nIs this correct?" 0 0 ||
         exit 0
 
     diskInput="$espDisk"
     sectorSize=$(blockdev --getss "$diskInput")
+    deletePartitions=()
 
-    local regions=() menu=() line start end sectors gib largest=0 defaultItem=1 n=0
-    while read -r line; do
-        set -- $line
-        start=$1 end=$2 sectors=$3
-        gib=$(( sectors * sectorSize / 1073741824 ))
+    local alignSectors=$(( 1048576 / sectorSize ))
+    local -A partStart partEnd
+    local candidates=() selected=() dev pstart psize ptype
+
+    # Existing partitions that may be deleted and reused. The ESP, other ESPs, APFS and Apple system partitions are never offered.
+    while read -r dev pstart psize ptype; do
+        partStart[$dev]=$pstart
+        partEnd[$dev]=$(( pstart + psize - 1 ))
+
+        [ "$dev" == "$esp" ] && continue
+
+        case "${ptype^^}" in
+            C12A7328-F81F-11D2-BA4B-00A0C93EC93B|7C3457EF-0000-11AA-AA11-00306543ECAC|52637672-7900-11AA-AA11-00306543ECAC|69646961-6700-11AA-AA11-00306543ECAC) continue ;;
+        esac
+
+        [ "$(lsblk -dno FSTYPE "$dev")" == "apfs" ] && continue
+
+        candidates+=("$dev" "$(lsblk -dno SIZE,FSTYPE,LABEL "$dev" | xargs)" "off")
+    done < <(sfdisk -d "$diskInput" | sed -n 's|^\([^ ]*\) : start= *\([0-9]*\), size= *\([0-9]*\), type=\([^,]*\).*|\1 \2 \3 \4|p')
+
+    local diskIndicator=$(lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL "$diskInput")
+
+    if [ "${#candidates[@]}" -gt 0 ]; then
+        local selection
+        selection=$(drawDialog --begin 2 2 --title "Current Layout" --infobox "$diskIndicator" 0 0 --and-widget --title "Partitioner - Reuse Partitions" --checklist "Optionally select existing Linux partitions (such as a previous installation) to DELETE and reuse their space.\n\nmacOS, APFS and EFI System Partitions are never offered.\n\nChoose 'Skip' to only use existing free space." 0 0 0 "${candidates[@]}")
+        read -r -a selected <<< "$selection"
+    fi
+
+    # Merge free space and the selected partitions into contiguous regions, small alignment gaps are bridged
+    local regionStart=() regionEnd=() regionParts=() k=-1 s e d
+    while read -r s e d; do
+        if [ "$k" -ge 0 ] && [ "$s" -le $(( regionEnd[k] + 1 + alignSectors )) ]; then
+            [ "$e" -gt "${regionEnd[k]}" ] && regionEnd[k]=$e
+        else
+            k=$(( k + 1 ))
+            regionStart[k]=$s regionEnd[k]=$e regionParts[k]=""
+        fi
+
+        [ "$d" != "-" ] && regionParts[k]+="$d "
+    done < <(
+        {
+            sfdisk --list-free "$diskInput" 2>/dev/null | grep -E '^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+' | awk '{print $1, $2, "-"}'
+            for dev in "${selected[@]}"; do
+                echo "${partStart[$dev]} ${partEnd[$dev]} $dev"
+            done
+        } | sort -n -k1,1
+    )
+
+    local menu=() gib largest=0 defaultItem="" i
+    for (( i = 0; i <= k; i++ )); do
+        gib=$(( (regionEnd[i] - regionStart[i] + 1) * sectorSize / 1073741824 ))
 
         # ignore small alignment gaps
         [ "$gib" -lt 1 ] && continue
 
-        n=$(( n + 1 ))
-        regions[$n]="$start $end $gib"
-        menu+=("$n" "Sectors ${start}-${end} (${gib}G)")
+        if [ -n "${regionParts[i]}" ]; then
+            menu+=("$i" "${gib}G - replaces ${regionParts[i]}")
+        else
+            menu+=("$i" "${gib}G - free space")
+        fi
 
         if [ "$gib" -gt "$largest" ]; then
             largest=$gib
-            defaultItem=$n
+            defaultItem=$i
         fi
-    done < <(sfdisk --list-free "$diskInput" 2>/dev/null | grep -E '^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+')
+    done
 
-    if [ "$n" -eq 0 ]; then
-        commandFailure="No usable free space was found on $diskInput. Please use the Asahi installer from macOS to leave free space for Void Linux."
-        die
+    if [ -z "$defaultItem" ]; then
+        drawDialog --title "Partitioner - No Space" --yes-label "Choose again" --no-label "Exit" --yesno "No usable space was found on $diskInput.\n\nEither select existing Linux partitions to replace, or use the Asahi installer from macOS to leave free space for Void Linux." 0 0 ||
+            exit 0
+        asahiDiskConfig
+        return 0
     fi
 
-    local diskIndicator=$(lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL "$diskInput")
     local choice
-    choice=$(drawDialog --begin 2 2 --title "Current Layout" --infobox "$diskIndicator" 0 0 --and-widget --title "Partitioner - Free Space" --default-item "$defaultItem" --menu "Existing partitions will not be modified.\n\nPlease choose the free space region on $diskInput to install Void Linux to:" 0 0 0 "${menu[@]}") ||
+    choice=$(drawDialog --begin 2 2 --title "Current Layout" --infobox "$diskIndicator" 0 0 --and-widget --title "Partitioner - Target Space" --default-item "$defaultItem" --menu "Please choose the space on $diskInput to install Void Linux to:" 0 0 0 "${menu[@]}") ||
         exit 0
 
-    set -- ${regions[$choice]}
-    freeStart=$1 freeEnd=$2
+    freeStart=${regionStart[choice]} freeEnd=${regionEnd[choice]}
+    read -r -a deletePartitions <<< "${regionParts[choice]}"
 
-    diskSize="${3}G"
-    diskFloat="$3"
+    if [ "${#deletePartitions[@]}" -gt 0 ]; then
+        local deleteInfo=$(lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT "${deletePartitions[@]}")
+        local notice=""
+        [ "${#deletePartitions[@]}" -lt "${#selected[@]}" ] &&
+            notice="\nSelected partitions outside of the chosen space will NOT be deleted.\n"
+
+        local typed
+        typed=$(drawDialog --no-cancel --title "Partitioner - WARNING" --inputbox "The following partitions will be DELETED once you confirm the installation, ALL DATA on them will be lost:\n\n$deleteInfo\n$notice\nAnything mounted, swap, LUKS or LVM on them will be closed automatically.\n\nType DELETE to confirm, anything else to choose again:" 0 0)
+
+        if [ "$typed" != "DELETE" ]; then
+            asahiDiskConfig
+            return 0
+        fi
+    fi
+
+    gib=$(( (freeEnd - freeStart + 1) * sectorSize / 1073741824 ))
+    diskSize="${gib}G"
+    diskFloat="$gib"
     diskAvailable=$(echo "$diskFloat" - 0.5 | bc)
     diskAvailable+="G"
 
@@ -411,7 +478,10 @@ confirm() {
     settings+="Target disk: $diskInput\n"
 
     if [ "$platform" == "asahi" ]; then
-        settings+="Target free space: sectors ${freeStart}-${freeEnd} ($diskSize)\n"
+        settings+="Target space: sectors ${freeStart}-${freeEnd} ($diskSize)\n"
+
+        [ "${#deletePartitions[@]}" -gt 0 ] &&
+            settings+="Partitions to DELETE: ${deletePartitions[*]}\n"
         settings+="ESP (not formatted): $esp\n"
     fi
     settings+="Encryption: $encryption\n"
@@ -483,7 +553,10 @@ confirm() {
         settings+="Enabled modules: ${modules[@]}\n"
 
     if [ "$platform" == "asahi" ]; then
-        local warning="Selecting 'Install' here will create new partitions in the chosen free space and install with the options below. Existing partitions, including macOS and the Asahi ESP, will not be modified."
+        local warning="Selecting 'Install' here will create new partitions in the chosen space and install with the options below. macOS and the Asahi ESP will not be modified."
+
+        [ "${#deletePartitions[@]}" -gt 0 ] &&
+            warning+=" The partitions ${deletePartitions[*]} will be DELETED."
     else
         local warning="Selecting 'Install' here will DESTROY ALL DATA on the chosen disk and install with the options below."
     fi

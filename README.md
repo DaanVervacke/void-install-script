@@ -83,8 +83,9 @@ Before running the installer:
 
 Differences from x86_64:
 
-- The disk is never wiped or repartitioned. The installer detects the Asahi ESP from the device tree (`/proc/device-tree/chosen/asahi,efi-system-partition`), asks for confirmation, and mounts it at `/boot/efi` without formatting it.
-- New partitions (root, and optionally swap and home) are created inside a free space region of your choice on the internal disk. The secure wipe option only shreds these new partitions.
+- The disk is never wiped as a whole. The installer detects the Asahi ESP from the device tree (`/proc/device-tree/chosen/asahi,efi-system-partition`), asks for confirmation, and mounts it at `/boot/efi` without formatting it. Boot files from previous installations (`EFI/BOOT/BOOTAA64.EFI`, `EFI/BOOT/grub.cfg`, `EFI/void`, `EFI/grub`) are removed. `m1n1/`, `asahi/` and `vendorfw/` are kept.
+- New partitions (root, and optionally swap and home) are created inside a space of your choice on the internal disk. The secure wipe option only shreds these new partitions.
+- Reinstalling over an existing (Asahi) Void Linux installation is supported. You can select existing Linux partitions to delete and reuse; the ESP, other EFI System Partitions, APFS and Apple system partitions are never offered. Selected partitions are merged with adjacent free space into one region. Deleting requires typing `DELETE`. Anything still using them on the live system (mounts, swap, LVM volume groups, LUKS mappings) is closed automatically.
 - `base-system` and `asahi-base` are installed. The kernel is always `linux-asahi`, so the kernel menu is skipped.
 - The default repository is `https://repo-default.voidlinux.org/current/aarch64` for both glibc (`aarch64`) and musl (`aarch64-musl`).
 - Bootloader choices:
