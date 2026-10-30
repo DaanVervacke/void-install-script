@@ -5,79 +5,153 @@ echo "Running setupdisk..."
 [ "$filesystem" == "zfs" ] &&
     { commandFailure="Running zgenhostid has failed." ; zgenhostid -f 0x00bab10c || die ; }
 
-if [ -n "$wipedisk" ] && [ "$wipedisk" -gt 0 ]; then
-    shred --verbose --random-source=/dev/urandom -n"$wipedisk" --zero "$diskInput" ||
-        { commandFailure="Disk erase has failed." ; die ; }
-fi
+asahiAddPartition() {
+    # $1: name, $2: size (such as '4G') or 'full', $3: sfdisk partition type shortcut
+    local start=$nextSector size bytes
 
-deviceVG=$(pvdisplay $diskInput* | grep "VG Name" | while read c1 c2; do echo $c2; done | sed 's/Name //g')
-
-if [ -n "$deviceVG" ]; then
-    commandFailure="VG destruction has failed."
-    vgchange -a n "$deviceVG" || die
-    vgremove "$deviceVG" || die
-fi
-
-commandFailure="Disk pre-install wipe has failed."
-scanpartitions="$diskInput?*" # We only want child partitions, not the parent drive
-for i in $scanpartitions
-do
-    wipefs --all -f "$i" 
-done
-
-sfdisk --delete "$diskInput"
-
-# 'echo ;' here is equivalent to pressing enter in fdisk
-# if you see this and you're wondering "wtf," id rather pipe into fdisk compared to deal with other partitioners
-(
-    echo g; # gpt table
-    echo n; echo ; echo ; echo +500M; echo t; echo 1; # ESP
-    [ "$lvm" == "No" ] && [ "$swapStyle" == "partition" ] &&
-        { echo n; echo ; echo ; echo +"$swapSize"; }
-
-    if [ "$filesystem" == "zfs" ] || [ "$filesystem" == "btrfs" ] || [ "$lvm" == "Yes" ] || [ "$rootSize" == "full" ]; then
-        echo n; echo ; echo ; echo ;
+    if [ "$2" == "full" ]; then
+        size=$(( (freeEnd + 1 - start) / alignSectors * alignSectors ))
+    else
+        bytes=$(numfmt --from=iec "$2") ||
+            { commandFailure="Invalid partition size: $2" ; die ; }
+        size=$(( (bytes / sectorSize + alignSectors - 1) / alignSectors * alignSectors ))
     fi
 
-    [ "$lvm" == "No" ] && [ "$rootSize" != "full" ] &&
-        { echo n; echo ; echo ; echo +"$rootSize"; }
+    if [ "$size" -le 0 ] || [ $(( start + size - 1 )) -gt "$freeEnd" ]; then
+        commandFailure="The $1 partition does not fit in the selected free space."
+        die
+    fi
 
-    [ "$lvm" == "No" ] && [ "$encryption" == "No" ] && [ -n "$homeSize" ] && [ "$homeSize" != "full" ] &&
-        { echo n; echo ; echo ; echo +"$homeSize"; }
+    sfdiskScript+="start=$start, size=$size, type=$3"$'\n'
+    partitionStarts[$1]=$start
+    nextSector=$(( start + size ))
 
-    [ "$lvm" == "No" ] && [ "$encryption" == "No" ] && [ "$homeSize" == "full" ] &&
-        { echo n; echo ; echo ; echo ; }
+    return 0
+}
 
-    echo w;
-) | fdisk -w always "$diskInput" ||
-    { commandFailure="Writing partition table to disk has failed." ; die ; }
+asahiPartitionDevice() {
+    # find the partition device starting at sector $1
+    sfdisk -d "$diskInput" | sed -n "s|^\([^ ]*\) : start= *$1,.*|\1|p"
+}
 
-# if idvar is unset, the following will set partition variables to, for example, sda1 instead of sdap1 (or more appropriately, nvme0n1p1 or likewise)
-# if you see this and can think of a less stupid name for this variable, feel free to make a PR
-if [[ "$diskInput" == /dev/nvme* ]] || [[ "$diskInput" == /dev/mmcblk* ]]; then
-    idvar="p"
-fi
+if [ "$platform" == "asahi" ]; then
+    # Never touch existing partitions on Apple Silicon, only append new ones inside the chosen free space.
+    # The Asahi ESP ($esp) was detected by setup/installer and is reused as-is.
+    declare -gA partitionStarts
+    sfdiskScript=""
+    alignSectors=$(( 1048576 / sectorSize ))
+    nextSector=$(( (freeStart + alignSectors - 1) / alignSectors * alignSectors ))
 
-esp="$diskInput""$idvar"1
+    [ "$lvm" == "No" ] && [ "$swapStyle" == "partition" ] &&
+        asahiAddPartition swap "$swapSize" S
 
-# root is p3 only when there's a swap partition ahead of it
-if [ "$lvm" == "No" ] && [ "$swapStyle" == "partition" ]; then
-    root="$diskInput""$idvar"3
+    if [ "$filesystem" == "btrfs" ] || [ "$lvm" == "Yes" ] || [ "$rootSize" == "full" ]; then
+        asahiAddPartition root full L
+    else
+        asahiAddPartition root "$rootSize" L
+    fi
+
+    [ "$lvm" == "No" ] && [ "$encryption" == "No" ] && [ -n "$homeSize" ] &&
+        asahiAddPartition home "$homeSize" L
+
+    echo -e "Creating partitions on $diskInput:\n$sfdiskScript"
+    printf "%s" "$sfdiskScript" | sfdisk --append --wipe-partitions always "$diskInput" ||
+        { commandFailure="Writing partition table to disk has failed." ; die ; }
+
+    partx -u "$diskInput" 2>/dev/null
+    udevadm settle
+
+    commandFailure="Locating newly created partitions has failed."
+    for i in "${!partitionStarts[@]}"
+    do
+        device=$(asahiPartitionDevice "${partitionStarts[$i]}")
+        [ -b "$device" ] || die
+        printf -v "$i" "%s" "$device"
+    done
+
+    if [ -n "$wipedisk" ] && [ "$wipedisk" -gt 0 ]; then
+        commandFailure="Partition erase has failed."
+        for i in "$swap" "$root" "$home"
+        do
+            [ -n "$i" ] &&
+                { shred --verbose --random-source=/dev/urandom -n"$wipedisk" --zero "$i" || die ; }
+        done
+    fi
 else
-    root="$diskInput""$idvar"2
+    if [ -n "$wipedisk" ] && [ "$wipedisk" -gt 0 ]; then
+        shred --verbose --random-source=/dev/urandom -n"$wipedisk" --zero "$diskInput" ||
+            { commandFailure="Disk erase has failed." ; die ; }
+    fi
+
+    deviceVG=$(pvdisplay $diskInput* | grep "VG Name" | while read c1 c2; do echo $c2; done | sed 's/Name //g')
+
+    if [ -n "$deviceVG" ]; then
+        commandFailure="VG destruction has failed."
+        vgchange -a n "$deviceVG" || die
+        vgremove "$deviceVG" || die
+    fi
+
+    commandFailure="Disk pre-install wipe has failed."
+    scanpartitions="$diskInput?*" # We only want child partitions, not the parent drive
+    for i in $scanpartitions
+    do
+        wipefs --all -f "$i" 
+    done
+
+    sfdisk --delete "$diskInput"
+
+    # 'echo ;' here is equivalent to pressing enter in fdisk
+    # if you see this and you're wondering "wtf," id rather pipe into fdisk compared to deal with other partitioners
+    (
+        echo g; # gpt table
+        echo n; echo ; echo ; echo +500M; echo t; echo 1; # ESP
+        [ "$lvm" == "No" ] && [ "$swapStyle" == "partition" ] &&
+            { echo n; echo ; echo ; echo +"$swapSize"; }
+
+        if [ "$filesystem" == "zfs" ] || [ "$filesystem" == "btrfs" ] || [ "$lvm" == "Yes" ] || [ "$rootSize" == "full" ]; then
+            echo n; echo ; echo ; echo ;
+        fi
+
+        [ "$lvm" == "No" ] && [ "$rootSize" != "full" ] &&
+            { echo n; echo ; echo ; echo +"$rootSize"; }
+
+        [ "$lvm" == "No" ] && [ "$encryption" == "No" ] && [ -n "$homeSize" ] && [ "$homeSize" != "full" ] &&
+            { echo n; echo ; echo ; echo +"$homeSize"; }
+
+        [ "$lvm" == "No" ] && [ "$encryption" == "No" ] && [ "$homeSize" == "full" ] &&
+            { echo n; echo ; echo ; echo ; }
+
+        echo w;
+    ) | fdisk -w always "$diskInput" ||
+        { commandFailure="Writing partition table to disk has failed." ; die ; }
+
+    # if idvar is unset, the following will set partition variables to, for example, sda1 instead of sdap1 (or more appropriately, nvme0n1p1 or likewise)
+    # if you see this and can think of a less stupid name for this variable, feel free to make a PR
+    if [[ "$diskInput" == /dev/nvme* ]] || [[ "$diskInput" == /dev/mmcblk* ]]; then
+        idvar="p"
+    fi
+
+    esp="$diskInput""$idvar"1
+
+    # root is p3 only when there's a swap partition ahead of it
+    if [ "$lvm" == "No" ] && [ "$swapStyle" == "partition" ]; then
+        root="$diskInput""$idvar"3
+    else
+        root="$diskInput""$idvar"2
+    fi
+
+    [ "$lvm" == "No" ] && [ "$swapStyle" == "partition" ] &&
+        swap="$diskInput""$idvar"2
+
+    [ "$lvm" == "No" ] && [ -n "$homeSize" ] && [ "$encryption" == "No" ] && [ -n "$swap" ] &&
+        home="$diskInput""$idvar"4
+
+    [ "$lvm" == "No" ] && [ -n "$homeSize" ] && [ "$encryption" == "No" ] && [ -z "$swap" ] &&
+        home="$diskInput""$idvar"3
+
+    mkfs.vfat -F 32 "$esp" ||
+        { commandFailure="Formatting ESP as vfat has failed." ; die ; }
 fi
-
-[ "$lvm" == "No" ] && [ "$swapStyle" == "partition" ] &&
-    swap="$diskInput""$idvar"2
-
-[ "$lvm" == "No" ] && [ -n "$homeSize" ] && [ "$encryption" == "No" ] && [ -n "$swap" ] &&
-    home="$diskInput""$idvar"4
-
-[ "$lvm" == "No" ] && [ -n "$homeSize" ] && [ "$encryption" == "No" ] && [ -z "$swap" ] &&
-    home="$diskInput""$idvar"3
-
-mkfs.vfat -F 32 "$esp" ||
-    { commandFailure="Formatting ESP as vfat has failed." ; die ; }
 
 if [ "$encryption" == "Yes" ] && [ "$filesystem" != "zfs" ]; then
 
@@ -368,8 +442,14 @@ if [ "$filesystem" == "btrfs" ]; then
     mkdir /mnt/usr || die
     btrfs su cr /mnt/usr/local || die
 
+    if [ "$platform" == "asahi" ]; then
+        grubTarget="arm64-efi"
+    else
+        grubTarget="x86_64-efi"
+    fi
+
     [ "$bootloader" == "grub" ] &&
-        { mkdir -p /mnt/boot/grub ; btrfs su cr /mnt/boot/grub/x86_64-efi || die ; }
+        { mkdir -p /mnt/boot/grub ; btrfs su cr /mnt/boot/grub/"$grubTarget" || die ; }
 fi
 
 # TODO: xchroot can deal with mounting these.

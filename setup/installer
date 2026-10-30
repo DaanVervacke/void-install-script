@@ -27,13 +27,49 @@ done
 [ -e "/sys/firmware/efi" ] ||
     { commandFailure="This script only supports UEFI systems, but it appears we have booted as BIOS." ; die ; }
 
-[ "$(uname -m)" != "x86_64" ] &&
-    { commandFailure="This systems CPU architecture is not currently supported by this installer." ; die ; }
+case "$(uname -m)" in
+    x86_64)
+        platform="x86_64"
+    ;;
+    aarch64)
+        # Only Apple Silicon (Asahi) is supported on aarch64
+        grep -q "apple,arm-platform" /proc/device-tree/compatible 2>/dev/null ||
+            { commandFailure="This aarch64 system does not appear to be an Apple Silicon Mac, which is the only supported aarch64 platform." ; die ; }
+
+        platform="asahi"
+    ;;
+    *)
+        commandFailure="This systems CPU architecture is not currently supported by this installer." ; die
+    ;;
+esac
 
 # if the host doesn't have zfs utils, don't populate
 # TODO: this needs better verification in the future.
 which zfs &>/dev/null ||
     zfspossible=no
+
+# zfs is not supported on Apple Silicon
+[ "$platform" == "asahi" ] &&
+    zfspossible=no
+
+if [ "$platform" == "asahi" ]; then
+    echo "Locating the Asahi EFI System Partition..."
+
+    # m1n1 exposes the PARTUUID of the ESP it was booted from in the device tree
+    [ -e /proc/device-tree/chosen/asahi,efi-system-partition ] ||
+        { commandFailure="Unable to determine the Asahi ESP from the device tree. Please make sure the Asahi Linux 'UEFI environment only' install has been completed from macOS." ; die ; }
+
+    espPartuuid=$(tr -d '\0' < /proc/device-tree/chosen/asahi,efi-system-partition)
+    esp=$(blkid -t PARTUUID="$espPartuuid" -o device | head -n 1)
+
+    [ -n "$esp" ] && [ -b "$esp" ] ||
+        { commandFailure="Unable to find the Asahi ESP with PARTUUID $espPartuuid." ; die ; }
+
+    espDisk="/dev/$(lsblk -no PKNAME "$esp" | head -n 1)"
+
+    [ -b "$espDisk" ] ||
+        { commandFailure="Unable to determine the disk containing the Asahi ESP ($esp)." ; die ; }
+fi
 
 echo "Finding out what libc is being used..."
 if ldd --version | grep GNU ; then

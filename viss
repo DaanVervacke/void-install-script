@@ -24,27 +24,88 @@ fi
 drawDialog --msgbox "Welcome!\n\nThis is primarily a guided installer, but at any moment you may press the 'Map' button to jump around the installer in a non-linear way, or to go back and change settings.\n\nYou may use your TAB key, arrow keys, and Enter/Return to navigate this TUI.\n\nPressing Enter now will begin the installation process, but no changes will be made to the disk until you confirm your installation settings." 0 0
 
 # Each section of the installer will have its own function, so the user can go back to a specific spot to change something.
-diskConfig() {
-    local diskList=$(lsblk -d -o NAME,SIZE -n -e7)
-    local diskIndicator=$(lsblk -o NAME,SIZE,TYPE -e7)
+asahiDiskConfig() {
+    # On Apple Silicon, the disk layout created by macOS and the Asahi installer must not be altered.
+    # Void is installed into free space left by the Asahi installer, and the existing Asahi ESP is reused.
+    local espSize=$(lsblk -dno SIZE "$esp")
 
-    if diskInput=$(drawDialog --begin 2 2 --title "Available Disks" --infobox "$diskIndicator" 0 0 --and-widget --title "Partitioner" --menu "The disk you choose will not be modified until you confirm your installation options.\n\nPlease choose the disk you would like to partition and install Void Linux to:" 0 0 0 $diskList) ; then
-        diskInput="/dev/$diskInput"
-    else
+    drawDialog --title "Partitioner - Asahi ESP" --yes-label "Continue" --no-label "Exit" --yesno "The following Asahi EFI System Partition was detected:\n\nESP: $esp ($espSize)\nPARTUUID: $espPartuuid\nDisk: $espDisk\n\nThis partition will be mounted at /boot/efi and will NOT be formatted.\n\nIs this correct?" 0 0 ||
         exit 0
+
+    diskInput="$espDisk"
+    sectorSize=$(blockdev --getss "$diskInput")
+
+    local regions=() menu=() line start end sectors gib largest=0 defaultItem=1 n=0
+    while read -r line; do
+        set -- $line
+        start=$1 end=$2 sectors=$3
+        gib=$(( sectors * sectorSize / 1073741824 ))
+
+        # ignore small alignment gaps
+        [ "$gib" -lt 1 ] && continue
+
+        n=$(( n + 1 ))
+        regions[$n]="$start $end $gib"
+        menu+=("$n" "Sectors ${start}-${end} (${gib}G)")
+
+        if [ "$gib" -gt "$largest" ]; then
+            largest=$gib
+            defaultItem=$n
+        fi
+    done < <(sfdisk --list-free "$diskInput" 2>/dev/null | grep -E '^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+')
+
+    if [ "$n" -eq 0 ]; then
+        commandFailure="No usable free space was found on $diskInput. Please use the Asahi installer from macOS to leave free space for Void Linux."
+        die
     fi
 
-    diskSize=$(lsblk --output SIZE -n -d "$diskInput")
-    diskFloat=$(echo "$diskSize" | sed 's/G//g')
+    local diskIndicator=$(lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL "$diskInput")
+    local choice
+    choice=$(drawDialog --begin 2 2 --title "Current Layout" --infobox "$diskIndicator" 0 0 --and-widget --title "Partitioner - Free Space" --default-item "$defaultItem" --menu "Existing partitions will not be modified.\n\nPlease choose the free space region on $diskInput to install Void Linux to:" 0 0 0 "${menu[@]}") ||
+        exit 0
+
+    set -- ${regions[$choice]}
+    freeStart=$1 freeEnd=$2
+
+    diskSize="${3}G"
+    diskFloat="$3"
     diskAvailable=$(echo "$diskFloat" - 0.5 | bc)
     diskAvailable+="G"
 
+    return 0
+}
+
+diskConfig() {
+    if [ "$platform" == "asahi" ]; then
+        asahiDiskConfig
+    else
+        local diskList=$(lsblk -d -o NAME,SIZE -n -e7)
+        local diskIndicator=$(lsblk -o NAME,SIZE,TYPE -e7)
+
+        if diskInput=$(drawDialog --begin 2 2 --title "Available Disks" --infobox "$diskIndicator" 0 0 --and-widget --title "Partitioner" --menu "The disk you choose will not be modified until you confirm your installation options.\n\nPlease choose the disk you would like to partition and install Void Linux to:" 0 0 0 $diskList) ; then
+            diskInput="/dev/$diskInput"
+        else
+            exit 0
+        fi
+
+        diskSize=$(lsblk --output SIZE -n -d "$diskInput")
+        diskFloat=$(echo "$diskSize" | sed 's/G//g')
+        diskAvailable=$(echo "$diskFloat" - 0.5 | bc)
+        diskAvailable+="G"
+    fi
+
     local diskIndicator=$(partitionerOutput)
+
+    if [ "$platform" == "asahi" ]; then
+        local wipeTarget="the new Void Linux partitions (existing partitions, macOS and the Asahi ESP are not touched)"
+    else
+        local wipeTarget="the selected disk"
+    fi
 
     if drawDialog --title "Partitioner - Encryption" --extra-button --extra-label "Map" --yesno "Should this installation be encrypted?" 0 0 ; then
         encryption="Yes"
-        drawDialog --title "Partitioner - Wipe Disk" --yesno "Would you like to securely wipe the selected disk before setup?\n\nThis can take quite a long time depending on how many passes you choose.\n\nBe aware that doing this on an SSD is likely a bad idea." 0 0 &&
-            wipedisk=$(drawDialog --title "Partitioner - Wipe Disk" --inputbox "How many passes would you like to do on this disk?\n\nSane values include 1-3. The more passes you choose, the longer this will take." 0 0)
+        drawDialog --title "Partitioner - Wipe Disk" --yesno "Would you like to securely wipe $wipeTarget before setup?\n\nThis can take quite a long time depending on how many passes you choose.\n\nBe aware that doing this on an SSD is likely a bad idea." 0 0 &&
+            wipedisk=$(drawDialog --title "Partitioner - Wipe Disk" --inputbox "How many passes would you like to do?\n\nSane values include 1-3. The more passes you choose, the longer this will take." 0 0)
     else
         [ "$?" == "3" ] && dungeonmap
         encryption="No"
@@ -145,6 +206,10 @@ suConfig() {
 }
 
 kernelConfig() {
+    # linux-asahi is the only kernel supporting Apple Silicon, and is pulled in by asahi-base
+    [ "$platform" == "asahi" ] &&
+        { kernel="linux-asahi" && bootloaderConfig ; }
+
     if [ "$filesystem" != "zfs" ]; then
         kernel=$(drawDialog --no-cancel --title "Kernel Choice" --extra-button --extra-label "Map" --menu "If you are unsure, choose 'linux'" 0 0 0 "linux" "- Normal Void kernel" "linux-lts" "- Older LTS kernel" "linux-mainline" "- Bleeding edge kernel")
     else
@@ -159,7 +224,11 @@ bootloaderConfig() {
     [ "$filesystem" == "zfs" ] &&
         { bootloader=zfsbootmenu && hostnameConfig ; }
 
-    bootloader=$(drawDialog --no-cancel --title "Bootloader choice" --extra-button --extra-label "Map" --menu "If you are unsure, choose 'grub'" 0 0 0 "grub" "- Traditional bootloader" "uki" "- Unified Kernel Image" "none" "- Installs no bootloader (Advanced)")
+    if [ "$platform" == "asahi" ]; then
+        bootloader=$(drawDialog --no-cancel --title "Bootloader choice" --extra-button --extra-label "Map" --menu "If you are unsure, choose 'grub'" 0 0 0 "grub" "- Traditional bootloader" "uki" "- Unified Kernel Image" "m1n1" "- m1n1 boots the kernel directly, without U-Boot (Advanced)" "none" "- Installs no bootloader (Advanced)")
+    else
+        bootloader=$(drawDialog --no-cancel --title "Bootloader choice" --extra-button --extra-label "Map" --menu "If you are unsure, choose 'grub'" 0 0 0 "grub" "- Traditional bootloader" "uki" "- Unified Kernel Image" "none" "- Installs no bootloader (Advanced)")
+    fi
     [ "$?" == "3" ] && dungeonmap
 
     initrdConfig
@@ -231,18 +300,31 @@ repositoryConfig() {
         repository=$(cat /etc/xbps.d/*-repository-main.conf | sed 's/repository=//g')
     else
         [ "$?" == "3" ] && dungeonmap
-        [ "$libc" == "glibc" ] && repository="https://repo-default.voidlinux.org/current"
-        [ "$libc" == "musl" ] && repository="https://repo-default.voidlinux.org/current/musl"
+        if [ "$platform" == "asahi" ]; then
+            # both aarch64 and aarch64-musl live in /current/aarch64
+            repository="https://repo-default.voidlinux.org/current/aarch64"
+        else
+            [ "$libc" == "glibc" ] && repository="https://repo-default.voidlinux.org/current"
+            [ "$libc" == "musl" ] && repository="https://repo-default.voidlinux.org/current/musl"
+        fi
     fi
 
-    [ "$libc" == "glibc" ] && ARCH="x86_64"
-    [ "$libc" == "musl" ] && ARCH="x86_64-musl"
+    if [ "$platform" == "asahi" ]; then
+        [ "$libc" == "glibc" ] && ARCH="aarch64"
+        [ "$libc" == "musl" ] && ARCH="aarch64-musl"
+    else
+        [ "$libc" == "glibc" ] && ARCH="x86_64"
+        [ "$libc" == "musl" ] && ARCH="x86_64-musl"
+    fi
 
     graphicsConfig
 }
 
 graphicsConfig() {
-    if [ "$libc" == "glibc" ]; then
+    if [ "$platform" == "asahi" ]; then
+        graphics=$(drawDialog --title 'Graphics Drivers' --extra-button --extra-label "Map" --checklist 'Select graphics drivers, or choose 'Skip' if you would like to skip:' 0 0 0 'asahi' '- Apple Silicon GPU driver' 'off')
+        [ "$?" == "3" ] && dungeonmap
+    elif [ "$libc" == "glibc" ]; then
         graphics=$(drawDialog --title 'Graphics Drivers' --extra-button --extra-label "Map" --checklist 'Select graphics drivers, or choose 'Skip' if you would like to skip:' 0 0 0 'intel' '' 'off' 'intel-32bit' '' 'off' 'amd' '' 'off' 'amd-32bit' '' 'off' 'nvidia' '- Proprietary driver' 'off' 'nvidia-32bit' '' 'off' 'nvidia-nouveau' '- Nvidia Nouveau driver (experimental)' 'off' 'nvidia-nouveau-32bit' '' 'off')
         [ "$?" == "3" ] && dungeonmap
     else
@@ -264,7 +346,12 @@ networkConfig() {
 }
 
 audioConfig() {
-    audio=$(drawDialog --no-cancel --title "Audio Server" --extra-button --extra-label "Map" --menu "If you are unsure, 'pipewire' is recommended." 0 0 0 "pipewire" "" "pulseaudio" "" "none" "")
+    if [ "$platform" == "asahi" ]; then
+        # asahi-audio, required for the speakers, depends on pipewire
+        audio=$(drawDialog --no-cancel --title "Audio Server" --extra-button --extra-label "Map" --menu "If you are unsure, 'pipewire' is recommended.\n\nasahi-audio will be installed alongside pipewire." 0 0 0 "pipewire" "" "none" "")
+    else
+        audio=$(drawDialog --no-cancel --title "Audio Server" --extra-button --extra-label "Map" --menu "If you are unsure, 'pipewire' is recommended." 0 0 0 "pipewire" "" "pulseaudio" "" "none" "")
+    fi
     [ "$?" == "3" ] && dungeonmap
 
     desktopConfig
@@ -297,7 +384,7 @@ modulesConfig() {
     done
 
     # Using dash here as a simple solution to it misbehaving when ran with bash
-    modules=( $(sh -c "dialog --stdout --title 'Extra Options' --extra-button --extra-label "Map" --no-mouse --backtitle "https://github.com/kkrruumm/void-install-script" --checklist 'Enable or disable extra install options: ' 0 0 0 $(echo "${modulesDialogArray[@]}")") )
+    modules=( $(sh -c "dialog --stdout --title 'Extra Options' --extra-button --extra-label "Map" --no-mouse --backtitle "https://github.com/DaanVervacke/void-install-script" --checklist 'Enable or disable extra install options: ' 0 0 0 $(echo "${modulesDialogArray[@]}")") )
     [ "$?" == "3" ] && dungeonmap
 
     confirm
@@ -314,11 +401,19 @@ confirm() {
     [ "$basesystem" != "base-system" ] &&
         settings="Base system: custom\n"
 
+    [ "$platform" == "asahi" ] &&
+        settings+="Platform: Apple Silicon (Asahi)\n"
+
     settings+="Repo mirror: $repository\n"
     settings+="Bootloader: $bootloader\n"
     settings+="Kernel: $kernel\n"
     settings+="Initramfs: $initrd\n"
     settings+="Target disk: $diskInput\n"
+
+    if [ "$platform" == "asahi" ]; then
+        settings+="Target free space: sectors ${freeStart}-${freeEnd} ($diskSize)\n"
+        settings+="ESP (not formatted): $esp\n"
+    fi
     settings+="Encryption: $encryption\n"
 
     if [ "$encryption" == "Yes" ] && [ -n "$wipedisk" ]; then
@@ -387,7 +482,13 @@ confirm() {
     [ -n "$modules" ] &&
         settings+="Enabled modules: ${modules[@]}\n"
 
-    drawDialog --yes-label "Install" --no-label "Exit" --extra-button --extra-label "Map" --title "Installation Overview" --yesno "Selecting 'Install' here will DESTROY ALL DATA on the chosen disk and install with the options below. \n\n
+    if [ "$platform" == "asahi" ]; then
+        local warning="Selecting 'Install' here will create new partitions in the chosen free space and install with the options below. Existing partitions, including macOS and the Asahi ESP, will not be modified."
+    else
+        local warning="Selecting 'Install' here will DESTROY ALL DATA on the chosen disk and install with the options below."
+    fi
+
+    drawDialog --yes-label "Install" --no-label "Exit" --extra-button --extra-label "Map" --title "Installation Overview" --yesno "$warning \n\n
 $settings\n
 To change any of these settings, choose 'Map'." 0 0
 
@@ -435,7 +536,7 @@ _install() {
         echo "void-install-script log"
         echo "date: $(date)"
         echo "commit: $(git -C "$(pwd)" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-        echo "environment: ${libc} ${ARCH} $(uname -r)"
+        echo "environment: ${platform} ${libc} ${ARCH} $(uname -r)"
         echo ""
         echo "user settings:"
         echo -e "$settings"
@@ -460,7 +561,8 @@ _install() {
         "diskInput $diskInput" \
         "username $username" \
         "desktop $desktop" \
-        "root $root")
+        "root $root" \
+        "platform $platform")
 
     for i in "${syschrootVarPairs[@]}"
     do
@@ -488,7 +590,7 @@ _install() {
     [ "$kernelparam_update" == "true" ] &&
         case "$bootloader" in
             grub) system 'update-grub' ;;
-            uki) system 'xbps-reconfigure -f linux"$(find /boot -name vmlinuz\* | tr -d "/boot/vmlinuz-" | cut -f1,2 -d".")"' ;;
+            uki|m1n1) system "xbps-reconfigure -f $(kernelPackage /mnt)" ;;
         esac
 
     # clean the xbps cache of any removed packages that were removed by the user via post_install or by the installer itself

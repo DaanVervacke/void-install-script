@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Not applicable on Apple Silicon (AMD GPU option)
+[ "$platform" == "asahi" ] && return 1
+
 title=amdgpu_unlock
 description="- Enables amdgpu overclocking"
 status=off

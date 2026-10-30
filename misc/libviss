@@ -11,7 +11,7 @@ die() {
 }
 
 drawDialog() {
-    dialog --stdout --cancel-label "Skip" --no-mouse --backtitle "https://github.com/kkrruumm/void-install-script" "$@"
+    dialog --stdout --cancel-label "Skip" --no-mouse --backtitle "https://github.com/DaanVervacke/void-install-script" "$@"
 }
 
 diskCalculator() {
@@ -77,6 +77,9 @@ setKernelParam() {
         uki)
             sed -i -e "s:loglevel=4:loglevel=4 $1:" /mnt/etc/kernel.d/post-install/60-ukify || die
         ;;
+        m1n1)
+            sed -i -e "s:loglevel=4:loglevel=4 $1:" /mnt/etc/m1n1.conf || die
+        ;;
         zfsbootmenu)
             # this variable should empty once it goes out of scope
             # no need to explicitly unset to prevent dupes
@@ -95,6 +98,18 @@ enableService() {
     for service in "$@"; do
         system "ln -s /etc/sv/$service /var/service"
     done
+
+    return 0
+}
+
+kernelPackage() {
+    # prints the package name of the installed kernel, for use with xbps-reconfigure
+    # $1 is an optional root prefix, such as /mnt when called from outside of the chroot
+    if [ "$platform" == "asahi" ]; then
+        echo "linux-asahi"
+    else
+        echo "linux$(find "$1"/boot -name vmlinuz\* | sed "s:^$1::" | tr -d "/boot/vmlinuz-" | cut -f1,2 -d".")"
+    fi
 
     return 0
 }
